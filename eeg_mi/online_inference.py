@@ -65,6 +65,14 @@ class RealTimeMI:
         self.zi_bp = None
         self._buf = np.zeros((len(self.ch_idx), 0))
 
+        # Total decimated (128 Hz) samples ever produced. The receiver should
+        # gate decisions on THIS, not on time.time(): wall-clock gating makes
+        # the number of decisions per trial depend on OS/LSL scheduling
+        # jitter, so the same recording produces a different number of
+        # windows per trial on every run. Counting emitted samples makes the
+        # window grid deterministic and tied only to the data itself.
+        self.n_produced = 0
+
         self.labels = list(self.b["event_id"].keys())
 
     # ----------------------------------------------------------------- #
@@ -136,6 +144,7 @@ class RealTimeMI:
         # 7. Ring buffer update
         with _track(timer, "pre/buffer"):
             self._buf = np.concatenate([self._buf, x_motor], axis=1)
+            self.n_produced += x_motor.shape[1]
             maxlen = 2 * self.win_samples
             if self._buf.shape[1] > maxlen:
                 self._buf = self._buf[:, -maxlen:]

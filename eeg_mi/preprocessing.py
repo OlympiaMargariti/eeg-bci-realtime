@@ -153,8 +153,8 @@ def make_epochs(raw: mne.io.BaseRaw) -> mne.Epochs:
             flat_event_id[name] = codes
 
     # Adding a reject critiria for voltage over 100uV on a given epoch (instead of ICA)
-    reject_criteria = dict(eeg=100e-6)
-    # reject_criteria = None
+    #reject_criteria = dict(eeg=100e-6)
+    reject_criteria = None
 
     epochs = mne.Epochs(
         raw_mi, events, event_id=flat_event_id,

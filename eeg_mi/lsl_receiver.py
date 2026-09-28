@@ -4,6 +4,17 @@ Raspberry Pi deployment chapter of the thesis.
 
 What it measures
 ----------------
+DETERMINISTIC WINDOWING
+    Decisions are gated on the number of decimated samples the model has
+    produced (RealTimeMI.n_produced), not on time.time(). Wall-clock gating
+    made the exact sample offset of every window depend on OS/LSL scheduling
+    jitter, so the same recording produced a different number of windows per
+    trial on every run. A window is only scored if the ground-truth label was
+    constant for the window's duration PLUS an extra `guard_ms` beforehand
+    (default 250 ms), which rejects windows contaminated by the causal
+    filters' group delay or by the ERD/ERS onset lag right after a trial
+    transition -- the "confusing" windows seen near trial boundaries.
+
 LATENCY (per decision, ms)
     * every preprocessing stage (notch / band-pass / CAR / decimation / buffer)
     * every sklearn pipeline step (e.g. filter-bank CSP, SelectKBest, PCA, SVC)
@@ -106,7 +117,8 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
                  stream_name: str | None = None, warmup_sec: float = 5.0,
                  duration: float | None = None, quiet: bool = False,
                  csv_path: Path | None = None, report_path: Path | None = None,
-                 hw_interval: float = 0.5, eos_timeout: float = 5.0) -> dict | None:
+                 hw_interval: float = 0.5, eos_timeout: float = 5.0,
+                 guard_ms: float = 250.0) -> dict | None:
 
     sysinfo = system_info()
     print("=" * 70)
@@ -155,7 +167,28 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
 
     step_sec = C.WINDOW_STEP
     gt_win = int(round(bci.win_sec * sfreq_in))      # GT samples per window
-    gt_buf = np.full(gt_win, -1.0)
+    # Extra history required BEFORE the window too. Two things contaminate a
+    # window right after a label change: (1) the causal notch/band-pass
+    # filters have a non-zero group delay, so filtered samples right after a
+    # boundary still carry some energy shaped by pre-boundary data; (2) ERD/
+    # ERS itself takes time to develop after the cue, so the true neural
+    # signal is genuinely ambiguous for a bit. `guard_ms` pushes the
+    # look-back further than the window itself so those samples don't get
+    # counted as valid, unlabelled-transition, test windows purely by luck of
+    # the scheduling jitter -- which is what was making run-to-run window
+    # counts per trial unstable.
+    guard_samples = int(round(guard_ms / 1000.0 * sfreq_in))
+    gt_buf = np.full(gt_win + guard_samples, -1.0)
+
+    # Decision cadence is now driven by the number of DECIMATED samples the
+    # model has actually produced (bci.n_produced), not by wall-clock time.
+    # Wall-clock gating (`now - last_predict >= step_sec`) makes the exact
+    # sample offset of each window depend on OS/LSL scheduling jitter, so the
+    # same recording yields a different number -- and a different alignment
+    # -- of windows per trial on every run. Stepping on the sample counter
+    # instead gives a fixed, reproducible window grid tied only to the data.
+    step_samples = max(1, int(round(step_sec * bci.sfreq)))
+    next_decision_at = bci.win_samples   # sample count at which the 1st decision is due
 
     y_true: list[int] = []
     y_pred: list[int] = []
@@ -216,74 +249,84 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
                 if not quiet:
                     print("--- warm-up finished, counters reset ---")
 
-            # ---------------- decision ----------------
-            if (now - last_predict) < step_sec or not bci.ready:
-                continue
+            # ---------------- decision(s) ----------------
+            # A `while`, not an `if`: if the receiver briefly fell behind
+            # (a slow HW sample, GC pause, big LSL chunk after a stall) a
+            # single push() can cross several step boundaries at once. Firing
+            # one decision per crossed boundary keeps the window grid
+            # aligned to the data instead of silently dropping windows,
+            # which is what used to make trial window counts vary run to run.
+            while bci.ready and bci.n_produced >= next_decision_at:
+                next_decision_at += step_samples
 
-            with timer.track("decision/total"):
-                label, scores = bci.try_predict(timer=timer, return_scores=True)
-            t_done = local_clock()
+                with timer.track("decision/total"):
+                    label, scores = bci.try_predict(timer=timer, return_scores=True)
+                t_done = local_clock()
 
-            if label is None:
-                continue
+                if label is None:
+                    continue
 
-            if time.time() - last_corr > 10.0:      # refresh clock offset
-                time_corr = inlet.time_correction(timeout=0.5)
-                last_corr = time.time()
+                if time.time() - last_corr > 10.0:      # refresh clock offset
+                    time_corr = inlet.time_correction(timeout=0.5)
+                    last_corr = time.time()
 
-            interval_ms = (now - last_predict) * 1e3
-            last_predict = now
-            if decision_times:
-                timer.add("decision/interval", interval_ms)
-            decision_times.append(now)
+                interval_ms = (now - last_predict) * 1e3
+                last_predict = now
+                if decision_times:
+                    timer.add("decision/interval", interval_ms)
+                decision_times.append(now)
 
-            # acquisition -> decision latency (the BCI-relevant one)
-            lat_e2e = None
-            if last_ts is not None:
-                lat_e2e = (t_done - (last_ts + time_corr)) * 1e3
-                if -50.0 < lat_e2e < 5000.0:        # ignore clock glitches
-                    e2e_ms.append(lat_e2e)
-                    timer.add("decision/end_to_end", lat_e2e)
+                # acquisition -> decision latency (the BCI-relevant one)
+                lat_e2e = None
+                if last_ts is not None:
+                    lat_e2e = (t_done - (last_ts + time_corr)) * 1e3
+                    if -50.0 < lat_e2e < 5000.0:        # ignore clock glitches
+                        e2e_ms.append(lat_e2e)
+                        timer.add("decision/end_to_end", lat_e2e)
 
-            compute_ms = timer.raw("decision/total")[-1]
+                compute_ms = timer.raw("decision/total")[-1]
 
-            # a window counts only if the WHOLE window sits inside one
-            # flagged test-set trial (no straddling of trial boundaries)
-            uniq = np.unique(gt_buf)
-            valid = uniq.size == 1 and uniq[0] != -1.0
-            if valid:
-                gt_idx = int(uniq[0])
-                gt_str = bci.labels[gt_idx] if gt_idx < len(bci.labels) else str(gt_idx)
-                y_true.append(gt_idx)
-                y_pred.append(label_to_idx.get(label, -1))
-                acc = 100.0 * float(np.mean(np.asarray(y_true) == np.asarray(y_pred)))
-                if not quiet:
-                    hw_now = hw.latest()
-                    ok = "TRUE " if label == gt_str else "FALSE"
-                    print(f"{label:<9}| gt {gt_str:<9}[{ok}] | "
-                          f"acc {acc:>5.1f}% | "
-                          f"compute {compute_ms:>5.1f} ms | "
-                          f"e2e {('%6.1f' % lat_e2e) if lat_e2e is not None else '   n/a'} ms | "
-                          f"cpu {hw_now.get('cpu_proc_pct', float('nan')):>5.1f}% | "
-                          f"rss {hw_now.get('rss_mb', float('nan')):>5.1f} MB | "
-                          f"T {hw_now.get('temp_c') or float('nan'):>4.1f}C")
-            else:
-                n_invalid_decisions += 1
+                # A window counts only if the label was constant for the
+                # window itself PLUS `guard_ms` beforehand (see comment at
+                # gt_buf's creation) -- this is what rejects the ambiguous
+                # samples right after a movement/rest transition instead of
+                # letting scheduling jitter decide, at random, whether they
+                # sneak into the evaluated set.
+                uniq = np.unique(gt_buf)
+                valid = uniq.size == 1 and uniq[0] != -1.0
+                if valid:
+                    gt_idx = int(uniq[0])
+                    gt_str = bci.labels[gt_idx] if gt_idx < len(bci.labels) else str(gt_idx)
+                    y_true.append(gt_idx)
+                    y_pred.append(label_to_idx.get(label, -1))
+                    acc = 100.0 * float(np.mean(np.asarray(y_true) == np.asarray(y_pred)))
+                    if not quiet:
+                        hw_now = hw.latest()
+                        ok = "TRUE " if label == gt_str else "FALSE"
+                        print(f"{label:<9}| gt {gt_str:<9}[{ok}] | "
+                              f"acc {acc:>5.1f}% | "
+                              f"compute {compute_ms:>5.1f} ms | "
+                              f"e2e {('%6.1f' % lat_e2e) if lat_e2e is not None else '   n/a'} ms | "
+                              f"cpu {hw_now.get('cpu_proc_pct', float('nan')):>5.1f}% | "
+                              f"rss {hw_now.get('rss_mb', float('nan')):>5.1f} MB | "
+                              f"T {hw_now.get('temp_c') or float('nan'):>4.1f}C")
+                else:
+                    n_invalid_decisions += 1
 
-            if csv_path is not None:
-                rows.append({
-                    "t_rel_s": now - t_start,
-                    "pred": label,
-                    "gt": int(uniq[0]) if valid else -1,
-                    "valid": int(valid),
-                    "compute_ms": compute_ms,
-                    "e2e_ms": lat_e2e,
-                    "interval_ms": interval_ms,
-                    "scores": None if scores is None else
-                              ";".join(f"{v:.4f}" for v in np.atleast_1d(scores)),
-                    **{k: hw.latest().get(k) for k in
-                       ("cpu_proc_pct", "rss_mb", "temp_c", "freq_mhz")},
-                })
+                if csv_path is not None:
+                    rows.append({
+                        "t_rel_s": now - t_start,
+                        "pred": label,
+                        "gt": int(uniq[0]) if valid else -1,
+                        "valid": int(valid),
+                        "compute_ms": compute_ms,
+                        "e2e_ms": lat_e2e,
+                        "interval_ms": interval_ms,
+                        "scores": None if scores is None else
+                                  ";".join(f"{v:.4f}" for v in np.atleast_1d(scores)),
+                        **{k: hw.latest().get(k) for k in
+                           ("cpu_proc_pct", "rss_mb", "temp_c", "freq_mhz")},
+                    })
 
     except KeyboardInterrupt:
         print("\nReceiver terminated by user.")
@@ -470,6 +513,11 @@ if __name__ == "__main__":
                     help="stop automatically after N seconds")
     ap.add_argument("--hw-interval", type=float, default=0.5,
                     help="hardware sampling period (s)")
+    ap.add_argument("--guard-ms", type=float, default=250.0,
+                    help="extra label-stability look-back before each window "
+                         "(ms), rejects windows too close to a trial "
+                         "transition (filter group delay + physiological "
+                         "onset lag)")
     ap.add_argument("--quiet", action="store_true",
                     help="no per-decision printing (recommended over SSH: "
                          "stdout is slow and inflates the measured latency)")
@@ -485,4 +533,4 @@ if __name__ == "__main__":
     run_receiver(model_file, subject=args.subject, model_name=model_name,
                  stream_name=args.stream, warmup_sec=args.warmup,
                  duration=args.duration, quiet=args.quiet, csv_path=csv_file,
-                 hw_interval=args.hw_interval)
+                 hw_interval=args.hw_interval, guard_ms=args.guard_ms)
