@@ -24,6 +24,7 @@ from sklearn.linear_model import LogisticRegression, RidgeClassifierCV
 from sklearn.feature_selection import SelectKBest, mutual_info_classif, f_classif
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.decomposition import PCA
+from scipy.signal import butter, sosfilt
 
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
@@ -53,11 +54,9 @@ class FilterBankCSP(BaseEstimator, TransformerMixin):
                      for _ in self.bands]
 
     def _filter_band(self, X, l_freq, h_freq):
-        # Filtering the 3D array (n_trials, n_channels, n_times)
-        return mne.filter.filter_data(
-            X, sfreq=self.sfreq, l_freq=l_freq, h_freq=h_freq, 
-            verbose="ERROR", fir_design="firwin"
-        )
+        # Causal IIR (Butterworth) φίλτρο - αποτρέπει τα FIR edge artifacts στα μικρά παράθυρα
+        sos = butter(4, [l_freq, h_freq], btype="band", fs=self.sfreq, output="sos")
+        return sosfilt(sos, X, axis=-1)
 
     def fit(self, X, y):
         for i, (l_freq, h_freq) in enumerate(self.bands):
@@ -86,10 +85,9 @@ class FilterBankTangentSpace(BaseEstimator, TransformerMixin):
         self.tangents = [TangentSpace(metric="riemann") for _ in self.bands]
 
     def _filter_band(self, X, l_freq, h_freq):
-        return mne.filter.filter_data(
-            X, sfreq=self.sfreq, l_freq=l_freq, h_freq=h_freq, 
-            verbose="ERROR", fir_design="firwin"
-        )
+        # Causal IIR (Butterworth) φίλτρο - αποτρέπει τα FIR edge artifacts στα μικρά παράθυρα
+        sos = butter(4, [l_freq, h_freq], btype="band", fs=self.sfreq, output="sos")
+        return sosfilt(sos, X, axis=-1)
 
     def fit(self, X, y):
         for i, (l_freq, h_freq) in enumerate(self.bands):
@@ -156,6 +154,7 @@ def build_models() -> dict[str, Pipeline]:
         ("scale", StandardScaler()),
         ("clf", LogisticRegression(C=1.0, class_weight="balanced", random_state=C.RANDOM_STATE)),
     ])
+
 
     # 6) Filter Bank Tanget + Mutual Info Feature K-Best Selection + PCA + any simple classifier (Logistic Regression / Ridge)
     models["fb_tangent"] = Pipeline([

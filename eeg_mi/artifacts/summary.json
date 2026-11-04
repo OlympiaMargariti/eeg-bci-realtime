@@ -1,110 +1,110 @@
 {
   "per_subject": [
     {
-      "subject": "Pilot1",
+      "subject": "pilot9",
       "best": "fbcsp",
       "results": {
         "svm": {
-          "accuracy": 0.7642857142857142,
-          "balanced_accuracy": 0.7642857142857142,
-          "kappa": 0.5285714285714286,
-          "f1_macro": 0.762821500077006,
+          "accuracy": 0.5,
+          "balanced_accuracy": 0.5,
+          "kappa": 0.0,
+          "f1_macro": 0.4949494949494949,
           "confusion": [
             [
-              48,
-              22
-            ],
-            [
-              11,
-              59
-            ]
-          ],
-          "cv_accuracy": 0.8
-        },
-        "rf": {
-          "accuracy": 0.7714285714285715,
-          "balanced_accuracy": 0.7714285714285714,
-          "kappa": 0.5428571428571429,
-          "f1_macro": 0.7713819146764646,
-          "confusion": [
-            [
-              53,
-              17
-            ],
-            [
-              15,
-              55
-            ]
-          ],
-          "cv_accuracy": 0.7857142857142856
-        },
-        "fbcsp": {
-          "accuracy": 0.9214285714285714,
-          "balanced_accuracy": 0.9214285714285715,
-          "kappa": 0.8428571428571429,
-          "f1_macro": 0.9214245624776775,
-          "confusion": [
-            [
-              64,
-              6
-            ],
-            [
-              5,
-              65
-            ]
-          ],
-          "cv_accuracy": 0.9261904761904762
-        },
-        "mdm": {
-          "accuracy": 0.7785714285714286,
-          "balanced_accuracy": 0.7785714285714286,
-          "kappa": 0.5571428571428572,
-          "f1_macro": 0.7782886334610473,
-          "confusion": [
-            [
-              57,
-              13
-            ],
-            [
-              18,
-              52
-            ]
-          ],
-          "cv_accuracy": 0.7785714285714286
-        },
-        "tangent_space": {
-          "accuracy": 0.8071428571428572,
-          "balanced_accuracy": 0.8071428571428572,
-          "kappa": 0.6142857142857143,
-          "f1_macro": 0.8066595059076263,
-          "confusion": [
-            [
-              53,
-              17
-            ],
-            [
-              10,
-              60
-            ]
-          ],
-          "cv_accuracy": 0.7666666666666667
-        },
-        "fb_tangent": {
-          "accuracy": 0.8857142857142857,
-          "balanced_accuracy": 0.8857142857142857,
-          "kappa": 0.7714285714285715,
-          "f1_macro": 0.8856209150326797,
-          "confusion": [
-            [
-              60,
-              10
+              6,
+              4
             ],
             [
               6,
-              64
+              4
             ]
           ],
-          "cv_accuracy": 0.8880952380952379
+          "cv_accuracy": 0.33333333333333337
+        },
+        "rf": {
+          "accuracy": 0.6,
+          "balanced_accuracy": 0.6,
+          "kappa": 0.19999999999999996,
+          "f1_macro": 0.6,
+          "confusion": [
+            [
+              6,
+              4
+            ],
+            [
+              4,
+              6
+            ]
+          ],
+          "cv_accuracy": 0.5
+        },
+        "fbcsp": {
+          "accuracy": 0.45,
+          "balanced_accuracy": 0.44999999999999996,
+          "kappa": -0.10000000000000009,
+          "f1_macro": 0.4373401534526854,
+          "confusion": [
+            [
+              6,
+              4
+            ],
+            [
+              7,
+              3
+            ]
+          ],
+          "cv_accuracy": 0.6
+        },
+        "mdm": {
+          "accuracy": 0.6,
+          "balanced_accuracy": 0.6,
+          "kappa": 0.19999999999999996,
+          "f1_macro": 0.6,
+          "confusion": [
+            [
+              6,
+              4
+            ],
+            [
+              4,
+              6
+            ]
+          ],
+          "cv_accuracy": 0.5166666666666667
+        },
+        "tangent_space": {
+          "accuracy": 0.7,
+          "balanced_accuracy": 0.7,
+          "kappa": 0.4,
+          "f1_macro": 0.6875,
+          "confusion": [
+            [
+              9,
+              1
+            ],
+            [
+              5,
+              5
+            ]
+          ],
+          "cv_accuracy": 0.5833333333333334
+        },
+        "fb_tangent": {
+          "accuracy": 0.7,
+          "balanced_accuracy": 0.7,
+          "kappa": 0.4,
+          "f1_macro": 0.7,
+          "confusion": [
+            [
+              7,
+              3
+            ],
+            [
+              3,
+              7
+            ]
+          ],
+          "cv_accuracy": 0.5333333333333333
         }
       }
     }
@@ -112,132 +112,132 @@
   "across_subjects": {
     "fb_tangent": {
       "accuracy": {
-        "mean": 0.8857142857142857,
+        "mean": 0.7,
         "std": 0.0,
         "n": 1
       },
       "balanced_accuracy": {
-        "mean": 0.8857142857142857,
+        "mean": 0.7,
         "std": 0.0,
         "n": 1
       },
       "kappa": {
-        "mean": 0.7714285714285715,
+        "mean": 0.4,
         "std": 0.0,
         "n": 1
       },
       "f1_macro": {
-        "mean": 0.8856209150326797,
+        "mean": 0.7,
         "std": 0.0,
         "n": 1
       }
     },
     "fbcsp": {
       "accuracy": {
-        "mean": 0.9214285714285714,
+        "mean": 0.45,
         "std": 0.0,
         "n": 1
       },
       "balanced_accuracy": {
-        "mean": 0.9214285714285715,
+        "mean": 0.44999999999999996,
         "std": 0.0,
         "n": 1
       },
       "kappa": {
-        "mean": 0.8428571428571429,
+        "mean": -0.10000000000000009,
         "std": 0.0,
         "n": 1
       },
       "f1_macro": {
-        "mean": 0.9214245624776775,
+        "mean": 0.4373401534526854,
         "std": 0.0,
         "n": 1
       }
     },
     "mdm": {
       "accuracy": {
-        "mean": 0.7785714285714286,
+        "mean": 0.6,
         "std": 0.0,
         "n": 1
       },
       "balanced_accuracy": {
-        "mean": 0.7785714285714286,
+        "mean": 0.6,
         "std": 0.0,
         "n": 1
       },
       "kappa": {
-        "mean": 0.5571428571428572,
+        "mean": 0.19999999999999996,
         "std": 0.0,
         "n": 1
       },
       "f1_macro": {
-        "mean": 0.7782886334610473,
+        "mean": 0.6,
         "std": 0.0,
         "n": 1
       }
     },
     "rf": {
       "accuracy": {
-        "mean": 0.7714285714285715,
+        "mean": 0.6,
         "std": 0.0,
         "n": 1
       },
       "balanced_accuracy": {
-        "mean": 0.7714285714285714,
+        "mean": 0.6,
         "std": 0.0,
         "n": 1
       },
       "kappa": {
-        "mean": 0.5428571428571429,
+        "mean": 0.19999999999999996,
         "std": 0.0,
         "n": 1
       },
       "f1_macro": {
-        "mean": 0.7713819146764646,
+        "mean": 0.6,
         "std": 0.0,
         "n": 1
       }
     },
     "svm": {
       "accuracy": {
-        "mean": 0.7642857142857142,
+        "mean": 0.5,
         "std": 0.0,
         "n": 1
       },
       "balanced_accuracy": {
-        "mean": 0.7642857142857142,
+        "mean": 0.5,
         "std": 0.0,
         "n": 1
       },
       "kappa": {
-        "mean": 0.5285714285714286,
+        "mean": 0.0,
         "std": 0.0,
         "n": 1
       },
       "f1_macro": {
-        "mean": 0.762821500077006,
+        "mean": 0.4949494949494949,
         "std": 0.0,
         "n": 1
       }
     },
     "tangent_space": {
       "accuracy": {
-        "mean": 0.8071428571428572,
+        "mean": 0.7,
         "std": 0.0,
         "n": 1
       },
       "balanced_accuracy": {
-        "mean": 0.8071428571428572,
+        "mean": 0.7,
         "std": 0.0,
         "n": 1
       },
       "kappa": {
-        "mean": 0.6142857142857143,
+        "mean": 0.4,
         "std": 0.0,
         "n": 1
       },
       "f1_macro": {
-        "mean": 0.8066595059076263,
+        "mean": 0.6875,
         "std": 0.0,
         "n": 1
       }

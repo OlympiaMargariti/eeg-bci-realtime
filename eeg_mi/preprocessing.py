@@ -133,7 +133,7 @@ def make_epochs(raw: mne.io.BaseRaw) -> mne.Epochs:
     eeg_picks = mne.pick_types(raw_mi.info, eeg=True)
     data = raw_mi.get_data()
     data[eeg_picks, :] = _causal_bandpass(
-        data[eeg_picks, :], raw_mi.info["sfreq"], *C.BROAD_BANDPASS, order=4)
+        data[eeg_picks, :], raw_mi.info["sfreq"], *C.BANDPASS, order=4)
     raw_mi._data[eeg_picks, :] = data[eeg_picks, :]
 
     events = mne.find_events(raw_mi, stim_channel=C.STIM_CHANNEL,

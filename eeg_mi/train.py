@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import joblib
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedGroupKFold
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sklearn.metrics import (
     accuracy_score, balanced_accuracy_score, cohen_kappa_score,
     f1_score, confusion_matrix,
@@ -97,34 +97,18 @@ def run_subject(path: Path) -> dict | None:
 
     test_times_sec = (test_events[:, 0] / epochs.info["sfreq"]).tolist()
     train_times_sec = (train_events[:, 0] / epochs.info["sfreq"]).tolist()
-
-    # 4. Helper function for Sliding Window Augmentation
-    def apply_windowing(X_data, y_data, sfreq):
-        win_samples = int(C.WINDOW_LEN * sfreq)
-        step_samples = int(C.WINDOW_STEP * sfreq)
-        total_samples = X_data.shape[2]
-        starts = list(range(0, total_samples - win_samples + 1, step_samples))
-
-        X_aug, y_aug, groups_aug = [], [], []
-        for i in range(len(X_data)):
-            for st in starts:
-                X_aug.append(X_data[i, :, st:st+win_samples])
-                y_aug.append(y_data[i])
-                groups_aug.append(i) # trial id
-        return np.array(X_aug, dtype=np.float64), np.array(y_aug, dtype=np.int64), np.array(groups_aug)
-    sfreq = epochs.info["sfreq"]
     
-    # Apply windowing to train and test set independantly
-    X_tr, y_tr, groups_tr = apply_windowing(X_tr_raw, y_tr_raw, sfreq)
-    X_te, y_te, _ = apply_windowing(X_te_raw, y_te_raw, sfreq)
-    cv = StratifiedGroupKFold(n_splits=C.CV_FOLDS) # Utilizing Grouped k-fold to avoid data leakage in between trials
+    X_tr, y_tr = X_tr_raw, y_tr_raw
+    X_te, y_te = X_te_raw, y_te_raw
 
-    print(f"  [Augmented] Train windows: {len(y_tr)} | Test windows: {len(y_te)}")
+    cv = StratifiedKFold(n_splits=C.CV_FOLDS, shuffle=True, random_state=C.RANDOM_STATE)
+
+    print(f"  Train windows: {len(y_tr)} | Test windows: {len(y_te)}")
 
     results, fitted = {}, {}
     for name, model in build_models().items():
         try:
-            cv_acc = cross_val_score(model, X_tr, y_tr, groups=groups_tr, cv=cv, scoring="accuracy").mean()
+            cv_acc = cross_val_score(model, X_tr, y_tr, cv=cv, scoring="accuracy").mean()
             model.fit(X_tr, y_tr)
             test_metrics = evaluate(y_te, model.predict(X_te))
         except Exception as exc:
@@ -194,15 +178,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None,
                     help="process only the first N files (quick test)")
+    ap.add_argument("--specific", type=int, default=None,
+                    help="process only the Nth file (1-based index)")
     args = ap.parse_args()
 
-    # Removing outdated directory to ensure clean output data
-    if C.OUTPUT_DIR.exists():
-        shutil.rmtree(C.OUTPUT_DIR)
+    # # Removing outdated directory to ensure clean output data
+    # if C.OUTPUT_DIR.exists():
+    #     shutil.rmtree(C.OUTPUT_DIR)
 
     files = sorted(C.DATA_DIR.glob(C.FILE_GLOB))
     if args.limit:
         files = files[: args.limit]
+    if args.specific:
+        files = [files[args.specific - 1]]
     if not files:
         raise SystemExit(f"No files matching {C.FILE_GLOB} in {C.DATA_DIR}")
 

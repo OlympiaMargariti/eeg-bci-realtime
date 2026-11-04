@@ -48,11 +48,11 @@ EVENT_ID = {
 # Trial timing (seconds) relative to the cue trigger.
 # Each trial lasts 3 s; we skip the first 0.5 s (cue/visual onset transient).
 TMIN = 0.5
-TMAX = 3
+TMAX = 2
 BASELINE = None                   # no baseline correction (online-friendly)
 
 # Parameters for Sliding Window Cropping, resulting in more epochs (training data)
-WINDOW_LEN = 1
+WINDOW_LEN = 1.5
 WINDOW_STEP = 0.25
 
 # --------------------------------------------------------------------------- #
@@ -60,10 +60,10 @@ WINDOW_STEP = 0.25
 # --------------------------------------------------------------------------- #
 SFREQ_TARGET = 128                # downsample target (Hz). 128 keeps <=64 Hz info
 NOTCH_FREQ = 50                   # mains frequency in Greece/EU (Hz)
-BANDPASS = (8.0, 30.0)            # mu (8-13) + beta (13-30): the MI-relevant band
+BANDPASS = (3.0, 30.0)            # mu (8-13) + beta (13-30): the MI-relevant band
 BROAD_BANDPASS = (1.0, 40.0)      # broad band used *before* ICA
 USE_ICA = False                   # remove EOG (blink/saccade) components
-ICA_N_COMPONENTS = 20
+ICA_N_COMPONENTS = 0.95          # ICA components to keep (PCA variance ratio)
 RANDOM_STATE = 42
 
 # --------------------------------------------------------------------------- #
