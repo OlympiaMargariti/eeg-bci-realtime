@@ -4,16 +4,22 @@ Raspberry Pi deployment chapter of the thesis.
 
 What it measures
 ----------------
-DETERMINISTIC WINDOWING
-    Decisions are gated on the number of decimated samples the model has
-    produced (RealTimeMI.n_produced), not on time.time(). Wall-clock gating
-    made the exact sample offset of every window depend on OS/LSL scheduling
-    jitter, so the same recording produced a different number of windows per
-    trial on every run. A window is only scored if the ground-truth label was
-    constant for the window's duration PLUS an extra `guard_ms` beforehand
-    (default 250 ms), which rejects windows contaminated by the causal
-    filters' group delay or by the ERD/ERS onset lag right after a trial
-    transition -- the "confusing" windows seen near trial boundaries.
+TWO MEASUREMENTS IN ONE RUN (they answer different questions)
+    1. ACCURACY -- cue-synchronous, ONE decision per test trial. The model is
+       trained on the fixed window [cue+TMIN, cue+TMAX], so it must be scored
+       on exactly that window. The streamer marks the labelled samples of
+       each test trial in the GroundTruth channel; the receiver splits the
+       incoming chunk at the sample where the label ends and classifies the
+       buffer right there. The window is defined by SAMPLE COUNTS, not by the
+       wall clock, so LSL/OS jitter changes only *when* the result is ready
+       (latency), never *which samples* are in the window: no test trial is
+       ever dropped or mis-aligned. This is the online counterpart of the
+       offline hold-out accuracy (same trials, same window).
+    2. LOAD -- free-running decisions every WINDOW_STEP seconds on the
+       latest window, exactly the worst-case duty cycle of a continuous BCI.
+       These feed all latency / CPU / RAM / temperature numbers and are NOT
+       compared with the ground truth (compute cost does not depend on the
+       label). Both run on the same stream, so one run gives both.
 
 LATENCY (per decision, ms)
     * every preprocessing stage (notch / band-pass / CAR / decimation / buffer)
@@ -36,10 +42,10 @@ HARDWARE
     * Raspberry Pi throttling / under-voltage flags (vcgencmd get_throttled)
 
 ACCURACY
-    * accuracy, balanced accuracy, Cohen's kappa, confusion matrix on the
-      test-set windows flagged by the streamer
-    * Wolpaw ITR (bits/min), so a slower-but-better model can be compared
-      against a faster-but-worse one on a single axis
+    * accuracy, balanced accuracy, Cohen's kappa, confusion matrix over the
+      cue-locked test-trial decisions (one per trial)
+    * Wolpaw ITR (bits/min) assuming one decision per `--trial-period`
+      seconds (default: TMAX, i.e. no inter-trial interval -> optimistic)
 
 Everything is printed at the end and written to
 `artifacts/online/Pilot<S>_<model>_online.json` (+ an optional per-decision CSV),
@@ -110,6 +116,46 @@ def _pct(x) -> str:
     return "n/a" if x is None else f"{x:.2f}"
 
 
+def _ci_find(directory: Path, name: str) -> Path:
+    """Case-insensitive lookup: bundles are a mix of 'Pilot1_*' and 'pilot18_*',
+    which works on Windows but NOT on the (case-sensitive) Pi filesystem."""
+    exact = Path(directory) / name
+    if exact.exists():
+        return exact
+    low = name.lower()
+    for p in Path(directory).iterdir():
+        if p.name.lower() == low:
+            return p
+    raise FileNotFoundError(f"{name} not found in {directory}")
+
+
+def _trial_ends(gt: np.ndarray, prev: float, run_carry: int):
+    """
+    Find the end of every labelled run in one chunk of the GroundTruth channel.
+
+    An end is a position k with gt[k] == -1 whose previous sample (gt[k-1], or
+    `prev` for k == 0) was labelled (>= 0). The trial window must therefore
+    end with the samples BEFORE k: push gt-aligned samples[:k], then decide.
+
+    Returns (edges, tail): edges = [(k, class_value, run_length_in_samples)],
+    tail = labelled samples that end this chunk (carry for the next call).
+    """
+    g = np.concatenate(([prev], gt))
+    lab = g >= 0
+    ks = np.flatnonzero(lab[:-1] & ~lab[1:])
+    neg = np.flatnonzero(~lab[1:])                 # unlabelled positions in this chunk
+    edges = []
+    for k in ks:
+        before = neg[neg < k]
+        run = int(k - (before[-1] + 1)) if before.size else int(run_carry + k)
+        edges.append((int(k), int(round(g[k])), run))
+    if lab[-1]:
+        tail = int(gt.size - (neg[-1] + 1)) if neg.size else int(run_carry + gt.size)
+    else:
+        tail = 0
+    return edges, tail
+
+
 # --------------------------------------------------------------------------- #
 # Main loop
 # --------------------------------------------------------------------------- #
@@ -118,7 +164,10 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
                  duration: float | None = None, quiet: bool = False,
                  csv_path: Path | None = None, report_path: Path | None = None,
                  hw_interval: float = 0.5, eos_timeout: float = 5.0,
-                 guard_ms: float = 250.0) -> dict | None:
+                 guard_ms: float = 250.0, wait_stream: float = 10.0,
+                 trial_period: float | None = None) -> dict | None:
+    # guard_ms is kept only so old command lines keep working: the cue-locked
+    # evaluation needs no guard (TMIN already skips the cue transient).
 
     sysinfo = system_info()
     print("=" * 70)
@@ -131,7 +180,7 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
     print(f"Threads     : OMP={os.environ.get('OMP_NUM_THREADS')}")
     print("=" * 70)
 
-    inlet = _connect(stream_name)
+    inlet = _connect(stream_name, timeout=wait_stream)
     if inlet is None:
         return None
 
@@ -166,29 +215,22 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
     hw.start()
 
     step_sec = C.WINDOW_STEP
-    gt_win = int(round(bci.win_sec * sfreq_in))      # GT samples per window
-    # Extra history required BEFORE the window too. Two things contaminate a
-    # window right after a label change: (1) the causal notch/band-pass
-    # filters have a non-zero group delay, so filtered samples right after a
-    # boundary still carry some energy shaped by pre-boundary data; (2) ERD/
-    # ERS itself takes time to develop after the cue, so the true neural
-    # signal is genuinely ambiguous for a bit. `guard_ms` pushes the
-    # look-back further than the window itself so those samples don't get
-    # counted as valid, unlabelled-transition, test windows purely by luck of
-    # the scheduling jitter -- which is what was making run-to-run window
-    # counts per trial unstable.
-    guard_samples = int(round(guard_ms / 1000.0 * sfreq_in))
-    gt_buf = np.full(gt_win + guard_samples, -1.0)
+    gt_win = int(round(bci.win_sec * sfreq_in))      # input-rate samples in a full window
 
-    # Decision cadence is now driven by the number of DECIMATED samples the
-    # model has actually produced (bci.n_produced), not by wall-clock time.
-    # Wall-clock gating (`now - last_predict >= step_sec`) makes the exact
-    # sample offset of each window depend on OS/LSL scheduling jitter, so the
-    # same recording yields a different number -- and a different alignment
-    # -- of windows per trial on every run. Stepping on the sample counter
-    # instead gives a fixed, reproducible window grid tied only to the data.
+    # Free-running decision cadence (LOAD measurement) is driven by the number
+    # of DECIMATED samples the model has produced (bci.n_produced), not by
+    # wall-clock time, so the window grid is reproducible and tied to the data.
     step_samples = max(1, int(round(step_sec * bci.sfreq)))
-    next_decision_at = bci.win_samples   # sample count at which the 1st decision is due
+    next_decision_at = bci.win_samples   # sample count at which the 1st periodic decision is due
+
+    # Cue-synchronous trial decisions (ACCURACY measurement)
+    prev_gt = -1.0            # GT value of the last sample of the previous chunk
+    run_carry = 0             # labelled samples that ended the previous chunk
+    gt_last = -1.0            # GT of the most recent sample (for the CSV only)
+    trial_true: list[int] = []
+    trial_pred: list[int] = []
+    trial_log: list[dict] = []
+    n_trials_skipped = 0
 
     y_true: list[int] = []
     y_pred: list[int] = []
@@ -225,11 +267,37 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
                 n_samples_recv += n_new
                 last_ts = timestamps[-1]
 
-                # ground-truth ring buffer at the INPUT rate
-                gt_buf = np.concatenate([gt_buf, samples[-1, :]])[-gt_win:]
-
-                with timer.track("preprocess/total"):
-                    bci.push(samples[:-1, :], timer=timer)
+                # The chunk is cut at every trial end so that the buffer holds
+                # exactly the labelled samples when the trial decision is made.
+                gt = samples[-1, :]
+                edges, run_carry_new = _trial_ends(gt, prev_gt, run_carry)
+                bounds = [0] + [e[0] for e in edges] + [n_new]
+                for i in range(len(bounds) - 1):
+                    a, b = bounds[i], bounds[i + 1]
+                    if b > a:
+                        with timer.track("preprocess/total"):
+                            bci.push(samples[:-1, a:b], timer=timer)
+                    if i < len(edges):
+                        _, cls, run = edges[i]
+                        if run >= gt_win and bci.ready:
+                            lbl, _sc = bci.try_predict(timer=None, return_scores=True)
+                            pred_idx = label_to_idx.get(lbl, -1)
+                            trial_true.append(int(cls))
+                            trial_pred.append(pred_idx)
+                            trial_log.append({"t_rel_s": time.time() - t_start,
+                                              "gt": int(cls), "pred": int(pred_idx),
+                                              "scores": None if _sc is None else
+                                              [float(v) for v in np.atleast_1d(_sc)]})
+                            if not quiet:
+                                ok = "TRUE " if pred_idx == cls else "FALSE"
+                                acc_t = 100.0 * float(np.mean(
+                                    np.asarray(trial_true) == np.asarray(trial_pred)))
+                                gt_str = bci.labels[cls] if cls < len(bci.labels) else str(cls)
+                                print(f"TRIAL {len(trial_true):>3} | {lbl:<9}| gt {gt_str:<9}"
+                                      f"[{ok}] | acc {acc_t:>5.1f}%")
+                        else:
+                            n_trials_skipped += 1
+                prev_gt, run_carry, gt_last = float(gt[-1]), run_carry_new, float(gt[-1])
             else:
                 if now - last_data > eos_timeout:
                     print(f"\nNo data for {eos_timeout:.0f}s -- stream ended.")
@@ -286,39 +354,25 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
 
                 compute_ms = timer.raw("decision/total")[-1]
 
-                # A window counts only if the label was constant for the
-                # window itself PLUS `guard_ms` beforehand (see comment at
-                # gt_buf's creation) -- this is what rejects the ambiguous
-                # samples right after a movement/rest transition instead of
-                # letting scheduling jitter decide, at random, whether they
-                # sneak into the evaluated set.
-                uniq = np.unique(gt_buf)
-                valid = uniq.size == 1 and uniq[0] != -1.0
-                if valid:
-                    gt_idx = int(uniq[0])
-                    gt_str = bci.labels[gt_idx] if gt_idx < len(bci.labels) else str(gt_idx)
-                    y_true.append(gt_idx)
-                    y_pred.append(label_to_idx.get(label, -1))
-                    acc = 100.0 * float(np.mean(np.asarray(y_true) == np.asarray(y_pred)))
-                    if not quiet:
-                        hw_now = hw.latest()
-                        ok = "TRUE " if label == gt_str else "FALSE"
-                        print(f"{label:<9}| gt {gt_str:<9}[{ok}] | "
-                              f"acc {acc:>5.1f}% | "
-                              f"compute {compute_ms:>5.1f} ms | "
-                              f"e2e {('%6.1f' % lat_e2e) if lat_e2e is not None else '   n/a'} ms | "
-                              f"cpu {hw_now.get('cpu_proc_pct', float('nan')):>5.1f}% | "
-                              f"rss {hw_now.get('rss_mb', float('nan')):>5.1f} MB | "
-                              f"T {hw_now.get('temp_c') or float('nan'):>4.1f}C")
-                else:
-                    n_invalid_decisions += 1
+                # Free-running decisions are the LOAD measurement: they are
+                # timed and logged, but NOT scored against the ground truth
+                # (a window that straddles a trial boundary has no valid label;
+                # accuracy comes from the cue-locked trial decisions above).
+                if not quiet:
+                    hw_now = hw.latest()
+                    print(f"load | {label:<9}| "
+                          f"compute {compute_ms:>5.1f} ms | "
+                          f"e2e {('%6.1f' % lat_e2e) if lat_e2e is not None else '   n/a'} ms | "
+                          f"cpu {hw_now.get('cpu_proc_pct', float('nan')):>5.1f}% | "
+                          f"rss {hw_now.get('rss_mb', float('nan')):>5.1f} MB | "
+                          f"T {hw_now.get('temp_c') or float('nan'):>4.1f}C")
 
                 if csv_path is not None:
                     rows.append({
                         "t_rel_s": now - t_start,
                         "pred": label,
-                        "gt": int(uniq[0]) if valid else -1,
-                        "valid": int(valid),
+                        "gt": int(gt_last),          # GT of the latest sample (analysis only)
+                        "valid": int(gt_last >= 0),
                         "compute_ms": compute_ms,
                         "e2e_ms": lat_e2e,
                         "interval_ms": interval_ms,
@@ -340,11 +394,12 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
                      subject=subject, model_name=model_name,
                      model_path=model_path, model_mb=model_mb,
                      load_ms=load_ms, rss_model_mb=rss_after - rss_before,
-                     y_true=y_true, y_pred=y_pred, e2e_ms=e2e_ms,
+                     y_true=trial_true, y_pred=trial_pred, e2e_ms=e2e_ms,
                      decision_times=decision_times, elapsed=elapsed,
                      sfreq_in=sfreq_in, n_samples_recv=n_samples_recv,
-                     n_invalid=n_invalid_decisions, rows=rows,
-                     csv_path=csv_path, report_path=report_path)
+                     n_invalid=n_trials_skipped, rows=rows,
+                     csv_path=csv_path, report_path=report_path,
+                     trial_log=trial_log, trial_period=trial_period)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,7 +408,8 @@ def run_receiver(model_path: Path, subject: int, model_name: str,
 def _finalise(*, bci, timer, hw, sysinfo, subject, model_name, model_path,
               model_mb, load_ms, rss_model_mb, y_true, y_pred, e2e_ms,
               decision_times, elapsed, sfreq_in, n_samples_recv, n_invalid,
-              rows, csv_path, report_path) -> dict:
+              rows, csv_path, report_path, trial_log=(),
+              trial_period=None) -> dict:
 
     n_dec = len(decision_times)
     dec_per_min = 60.0 * n_dec / elapsed if elapsed > 0 else 0.0
@@ -375,8 +431,9 @@ def _finalise(*, bci, timer, hw, sysinfo, subject, model_name, model_path,
     print("=" * 70)
     print(f"Duration              : {elapsed:.1f} s "
           f"({stream_sec:.1f} s of EEG received)")
-    print(f"Decisions             : {n_dec} "
-          f"({dec_per_min:.1f}/min, {n_invalid} outside test trials)")
+    print(f"Free-running decisions: {n_dec} ({dec_per_min:.1f}/min) | "
+          f"cue-locked trial decisions: {len(y_true)} "
+          f"({n_invalid} partial trials skipped)")
     exp = int(round(elapsed * sfreq_in))
     print(f"Samples received      : {n_samples_recv} / ~{exp} expected "
           f"({100.0 * n_samples_recv / exp if exp else 0:.1f}%)")
@@ -419,17 +476,20 @@ def _finalise(*, bci, timer, hw, sysinfo, subject, model_name, model_path,
     if y_true:
         yt, yp = np.asarray(y_true), np.asarray(y_pred)
         metrics = {
-            "n_windows": int(yt.size),
+            "n_windows": int(yt.size),       # kept for old plotting scripts
+            "n_trials": int(yt.size),
             "accuracy": float(accuracy_score(yt, yp)),
             "balanced_accuracy": float(balanced_accuracy_score(yt, yp)),
             "kappa": float(cohen_kappa_score(yt, yp)),
             "f1_macro": float(f1_score(yt, yp, average="macro")),
             "confusion": confusion_matrix(yt, yp).tolist(),
         }
-        itr = wolpaw_itr(metrics["accuracy"], len(bci.labels), dec_per_min)
+        period = float(trial_period) if trial_period else float(C.TMAX)
+        itr = wolpaw_itr(metrics["accuracy"], len(bci.labels), 60.0 / period)
         metrics["itr"] = itr
-        print("\n--- Classification (test-set windows only) ---")
-        print(f"Windows               : {metrics['n_windows']}")
+        metrics["itr_trial_period_s"] = period
+        print("\n--- Classification (cue-synchronous: 1 decision per test trial) ---")
+        print(f"Test trials           : {metrics['n_trials']}")
         print(f"Accuracy              : {100 * metrics['accuracy']:.2f}%  "
               f"(balanced {100 * metrics['balanced_accuracy']:.2f}%)")
         print(f"Kappa / F1-macro      : {metrics['kappa']:.3f} / "
@@ -437,9 +497,10 @@ def _finalise(*, bci, timer, hw, sysinfo, subject, model_name, model_path,
         print(f"Confusion             : {metrics['confusion']} "
               f"(rows=true {bci.labels})")
         print(f"ITR (Wolpaw)          : {itr['bits_per_decision']:.3f} bits/decision"
-              f" -> {itr['bits_per_min']:.1f} bits/min")
+              f" -> {itr['bits_per_min']:.1f} bits/min "
+              f"(assumes 1 decision / {period:.1f} s; set --trial-period)")
     else:
-        print("\nNo test-set windows were evaluated "
+        print("\nNo test trials were evaluated "
               "(is the streamer flagging the GroundTruth channel?).")
 
     payload = {
@@ -448,11 +509,12 @@ def _finalise(*, bci, timer, hw, sysinfo, subject, model_name, model_path,
         "model_path": str(model_path),
         "system": sysinfo,
         "run": {
+            "eval_mode": "cue_synchronous_trial_locked",
             "elapsed_s": elapsed,
             "eeg_seconds_received": stream_sec,
             "n_decisions": n_dec,
             "decisions_per_min": dec_per_min,
-            "n_decisions_outside_test_trials": n_invalid,
+            "n_partial_trials_skipped": n_invalid,
             "samples_received": n_samples_recv,
             "samples_expected": exp,
             "window_s": bci.win_sec,
@@ -479,6 +541,7 @@ def _finalise(*, bci, timer, hw, sysinfo, subject, model_name, model_path,
         },
         "hardware": hw.summary(),
         "metrics": metrics,
+        "trials": list(trial_log),
     }
 
     if report_path is None:
@@ -514,10 +577,12 @@ if __name__ == "__main__":
     ap.add_argument("--hw-interval", type=float, default=0.5,
                     help="hardware sampling period (s)")
     ap.add_argument("--guard-ms", type=float, default=250.0,
-                    help="extra label-stability look-back before each window "
-                         "(ms), rejects windows too close to a trial "
-                         "transition (filter group delay + physiological "
-                         "onset lag)")
+                    help="(ignored, kept for old command lines) the cue-locked "
+                         "evaluation needs no guard")
+    ap.add_argument("--wait-stream", type=float, default=10.0,
+                    help="seconds to wait for the LSL stream to appear")
+    ap.add_argument("--trial-period", type=float, default=None,
+                    help="seconds per decision for the ITR (default: TMAX)")
     ap.add_argument("--quiet", action="store_true",
                     help="no per-decision printing (recommended over SSH: "
                          "stdout is slow and inflates the measured latency)")
@@ -526,11 +591,12 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     model_name = C.MODEL_MAP[args.model]
-    model_file = C.OUTPUT_DIR / f"Pilot{args.subject}_{model_name}.joblib"
+    model_file = _ci_find(C.OUTPUT_DIR, f"Pilot{args.subject}_{model_name}.joblib")
     csv_file = (C.OUTPUT_DIR / "online" /
                 f"Pilot{args.subject}_{model_name}_decisions.csv") if args.csv else None
 
     run_receiver(model_file, subject=args.subject, model_name=model_name,
                  stream_name=args.stream, warmup_sec=args.warmup,
                  duration=args.duration, quiet=args.quiet, csv_path=csv_file,
-                 hw_interval=args.hw_interval, guard_ms=args.guard_ms)
+                 hw_interval=args.hw_interval, guard_ms=args.guard_ms,
+                 wait_stream=args.wait_stream, trial_period=args.trial_period)

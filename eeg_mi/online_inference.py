@@ -35,8 +35,10 @@ def _track(timer, name):
 
 class RealTimeMI:
     def __init__(self, bundle_path: str, all_ch_names: list[str] | None = None,
-                 sfreq_in: float = C.SFREQ_ORIG):
+                 sfreq_in: float = C.SFREQ_ORIG,
+                 apply_mi_bandpass: bool = True):
         self.b = joblib.load(bundle_path)
+        self.apply_mi_bandpass = apply_mi_bandpass
         self.pipeline = self.b["pipeline"]
         self.model_channels = self.b["channels"]
         self.model_name = self.b.get("model_name", "unknown")
@@ -59,6 +61,16 @@ class RealTimeMI:
         self.sos_bp = butter(4, [lo / ny, hi / ny], btype="band", output="sos")
         bn, an = iirnotch(C.NOTCH_FREQ / ny, Q=30)
         self.sos_notch = tf2sos(bn, an)
+
+        # MI band-pass (3-30 Hz) at the model rate, same as make_epochs().
+        # Offline it is a causal sosfilt with ZERO initial state over the whole
+        # recording, so the state starts at zero here too and is carried across
+        # chunks. It runs on the motor channels only (per-channel linear filter,
+        # so picking before/after is equivalent).
+        mi_lo, mi_hi = self.b.get("mi_bandpass", C.BANDPASS)
+        self.sos_mi = butter(4, [mi_lo, mi_hi], btype="band", fs=self.sfreq,
+                             output="sos")
+        self.zi_mi = np.zeros((self.sos_mi.shape[0], len(self.ch_idx), 2))
 
         # Tracing filter states for all 64 channels to ensure correct CAR
         self.zi_notch = None
@@ -141,7 +153,13 @@ class RealTimeMI:
                 x_motor = x_motor[:, offset::self.decim]
                 self.sample_count += n_new
 
-        # 7. Ring buffer update
+        # 7. MI band-pass at 128 Hz (the step that was missing online)
+        with _track(timer, "pre/mi_bandpass"):
+            if self.apply_mi_bandpass and x_motor.shape[1] > 0:
+                x_motor, self.zi_mi = sosfilt(self.sos_mi, x_motor, axis=-1,
+                                              zi=self.zi_mi)
+
+        # 8. Ring buffer update
         with _track(timer, "pre/buffer"):
             self._buf = np.concatenate([self._buf, x_motor], axis=1)
             self.n_produced += x_motor.shape[1]
