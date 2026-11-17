@@ -1,5 +1,7 @@
 # EEG Motor-Imagery Pipeline (Movement vs Rest) — Offline Training & Online Pi Inference via LSL
 
+This project is still a work in progress.
+
 A complete pipeline for a real-time motor-imagery BCI. It pre-processes BioSemi `.bdf` 
 recordings with MNE, trains and compares six different classifiers per subject using 
 sliding-window augmentation, and streams data via LSL for real-time online classification.
